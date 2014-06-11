@@ -1,0 +1,203 @@
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_files:
+    - env_variables.yml
+    - secure.yml
+  tags:
+    - cloudformation
+  tasks:
+    - name: create the keypair for ec2
+      ec2_key:
+        name: "{{demo_stack_name|default('ansible-demo')}}"
+        region: us-east-1
+        key_material: "{{item}}"
+        wait: yes
+        state: present
+      with_file: '~/.ssh/id_rsa.ansible.pub'
+
+    - name: launch ansible-demo cloudformation
+      cloudformation:
+        stack_name: "{{demo_stack_name|default('ansible-demo')}}"
+        state: present
+        region: "{{demo_region|default('us-east-1')}}"
+        disable_rollback: yes
+        template: environment.json
+        template_parameters:
+          KeyName: "{{demo_stack_name|default('ansible-demo')}}"
+          WebInstanceType: "{{web_instance_type|default('m1.small')}}"
+          WebServerPort: "{{web_server_port|default('8080')}}"
+          WebMinInstances: "{{web_num_instances|default('5')}}"
+          WebMaxInstances: "{{web_num_instances|default('5')}}"
+          DBName: "{{db_name|default('ansibledemo')}}"
+          DBUser: "{{db_user|default('admin')}}"
+          DBPassword: "{{db_password}}"
+          DBAllocatedStorage: "{{db_allocated_storage|default('5')}}"
+          DBInstanceClass: "{{db_instance_class|default('db.m1.small')}}"
+          DBMultiAZ: "{{db_multi_az|default('false')}}"
+          DBReadReplica: "{{db_read_replica|default('false')}}"
+        tags:
+          Stack: "{{demo_stack_name|default('ansible-demo')}}"
+      register: cf_info
+
+- hosts: "tag_Stack_{{demo_stack_name|default('ansible-demo')}}"
+  gather_facts: no
+  remote_user: ubuntu
+  vars_files:
+    - env_variables.yml
+  tags:
+  - drupal
+  tasks:
+    - name: wait for the instances to become available
+      local_action:
+        module: wait_for
+        port: 22
+        host: "{{ inventory_hostname }}"
+    - pause: seconds=60
+
+- hosts: "tag_Stack_{{demo_stack_name|default('ansible-demo')}}"
+  gather_facts: yes
+  remote_user: ubuntu
+  sudo: yes
+  vars_files:
+    - env_variables.yml
+  tags:
+  - drupal
+  roles:
+  - role: bennojoy.nginx
+    nginx_sites:
+    - server:
+        file_name: ansible-demo
+        listen: 8080
+        server_name: localhost
+        root: "/srv/www/ansible-demo"
+        index: "index.php"
+        location1:
+          name: "/favicon.ico"
+          log_not_found: "off"
+          access_log: "off"
+        location2:
+          name: "/backup"
+          deny: "all"
+        location3:
+          name: "~* \\.(txt|log)$"
+          allow: "127.0.0.1"
+          deny: "all"
+        location4:
+          name: "~ \\..*/.*\\.php"
+          return: "403"
+        location5:
+          name: "~ \\.php$"
+          include: "fastcgi_params"
+          fastcgi_param: "SCRIPT_FILENAME $document_root$fastcgi_script_name"
+          fastcgi_intercept_errors: "on"
+          fastcgi_pass: "127.0.0.1:9000"
+        location6:
+          name: "@rewrite"
+          rewrite: "^/(.*)$ /index.php?q=$1"
+        location7: 
+          name: "/"
+          try_files: "$uri $uri/ @rewrite"
+          expires: "max"
+  
+  - role: nbz4live.php-fpm
+    apt_packages:
+      - php5-cli
+      - php5-fpm
+      - php5-gd
+      - php5-mysql
+    php_config:
+      - option: "engine"
+        section: "PHP"
+        value: "1"
+      - option: "error_reporting"
+        section: "PHP"
+        value: "E_ALL & ~E_DEPRECATED & ~E_STRICT"
+      - option: "date.timezone"
+        section: "PHP"
+        value: "Europe/Berlin"
+      - option: "soap.wsdl_cache_dir"
+        section: "soap"
+        value: "/tmp"
+      - option: "pdo_mysql.cache_size"
+        section: "Pdo_mysql"
+        value: "2000"
+    fpm_pools:
+      - pool:
+          name: nginx
+          vars:
+            - user = www-data
+            - group = www-data
+            - listen = 127.0.0.1:9000
+            - pm = dynamic
+            - pm.max_children = 4
+            - pm.start_servers = 1
+            - pm.min_spare_servers = 1
+            - pm.max_spare_servers = 4
+            - chdir = /
+  tasks:
+  - file: path=/srv/www/ansible-demo state=directory owner=www-data group=www-data mode=750
+  - apt: name="{{item}}"
+    with_items:
+    - git
+    - drush
+    - mysql-client
+  - git: repo=git://git.drupal.org/project/drupal.git version="7.28" dest=/srv/www/ansible-demo
+  - file: path=/srv/www/ansible-demo/healthy.html state=touch owner=www-data group=www-data mode=644
+  - file: path=/srv/www/ansible-demo/sites/default/files state=directory owner=www-data group=www-data mode=750
+
+- hosts: "tag_Stack_{{demo_stack_name|default('ansible-demo')}}[0]"
+  gather_facts: no
+  remote_user: ubuntu
+  sudo: yes
+  vars_files:
+    - env_variables.yml
+    - secure.yml
+  tags:
+  - drupal
+  - drupal_install
+  tasks:
+  - name: install python-mysqldb for the mysql_db module use
+    apt: name=python-mysqldb
+  - name: create the drupal database
+    mysql_db:
+      name: drupal
+      state: present
+      login_host: "{{hostvars['localhost'].cf_info.stack_outputs.DBEndpoint}}"
+      login_user: "admin"
+      login_password: "{{db_password}}"
+    register: db_create
+  - name: install drupal
+    shell: >
+      pwd && drush site-install standard -y --db-url="mysql://{{db_user|default('admin')}}:{{db_password}}@{{hostvars['localhost'].cf_info.stack_outputs.DBEndpoint}}/drupal" --site-name=ansible-demo --account-name=admin --account-pass="{{admin_password}}" chdir=/srv/www/ansible-demo
+    when: db_create.changed or force_drupal_install is defined
+    register: drupal_install
+    no_log: yes
+
+- hosts: "tag_Stack_{{demo_stack_name|default('ansible-demo')}}"
+  gather_facts: no
+  remote_user: ubuntu
+  sudo: yes
+  vars_files:
+    - env_variables.yml
+    - secure.yml
+  tags:
+    - drupal
+    - drupal_install
+  tasks:
+  - name: deploy the settings.php file
+    template: src=templates/settings.php.j2 dest=/srv/www/ansible-demo/sites/default/settings.php owner=www-data group=www-data mode=640
+    register: settings_results
+  - name: restart nginx
+    service: name=nginx state=restarted
+    when: >
+      settings_results.changed or 
+      hostvars[groups["tag_Stack_{{demo_stack_name|default('ansible-demo')}}"][0]].drupal_install is defined and 
+      hostvars[groups["tag_Stack_{{demo_stack_name|default('ansible-demo')}}"][0]].drupal_install.changed
+
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+  - name: show endpoint
+    debug: 'msg="The ELB endpoint is: {{cf_info.stack_outputs.URL}}"'

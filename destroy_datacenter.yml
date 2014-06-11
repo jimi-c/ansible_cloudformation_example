@@ -1,0 +1,18 @@
+- hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+    - name: destroy the ansible-demo cloudformation
+      cloudformation:
+        stack_name: "{{demo_stack_name|default('ansible-demo')}}"
+        region: "{{demo_region|default('us-east-1')}}"
+        template: environment.json
+        state: absent
+
+    - name: delete the demo keypair
+      ec2_key:
+        name: "{{demo_stack_name|default('ansible-demo')}}"
+        region: "{{demo_region|default('us-east-1')}}"
+        state: absent
+        wait: yes
+

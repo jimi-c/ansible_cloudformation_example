@@ -1,0 +1,255 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Ansible Demo Environment",
+
+  "Parameters" : {
+    "KeyName" : {
+      "Description" : "The EC2 Key Pair to allow SSH access to the instances",
+      "Type" : "String"
+    },
+    "WebInstanceType" : {
+      "Description" : "Type of EC2 instance to launch",
+      "Type" : "String"
+    },
+    "WebServerPort" : {
+      "Description" : "The TCP port for the Web Server",
+      "Type" : "String"
+    },
+    "WebMinInstances": {
+      "Default": "1",
+      "Description": "The minimum number of instances in the auto-scaling group",
+      "Type": "String"
+    },
+    "WebMaxInstances": {
+      "Default": "1",
+      "Description": "The maximum number of instances in the auto-scaling group",
+      "Type": "String"
+    },
+    "DBName": {
+      "Default": "ansibledemo",
+      "Description": "The database name",
+      "Type": "String",
+      "MinLength": "1",
+      "MaxLength": "64",
+      "AllowedPattern": "[a-zA-Z][a-zA-Z0-9\\-]*"
+    },
+    "DBUser": {
+      "Default": "admin",
+      "NoEcho": "true",
+      "Description": "The database admin account username",
+      "Type": "String",
+      "MinLength": "1",
+      "MaxLength": "16",
+      "AllowedPattern": "[a-zA-Z][a-zA-Z0-9]*",
+      "ConstraintDescription": "must begin with a letter and contain only alphanumeric characters."
+    },
+    "DBPassword": {
+      "NoEcho": "true",
+      "Description": "The database admin account password",
+      "Type": "String",
+      "MinLength": "8",
+      "MaxLength": "41",
+      "AllowedPattern": "[a-zA-Z0-9]*",
+      "ConstraintDescription": "must contain only alphanumeric characters."
+    },
+    "DBAllocatedStorage": {
+      "Default": "5",
+      "Description": "The size of the database (Gb)",
+      "Type": "Number",
+      "MinValue": "5",
+      "MaxValue": "1024",
+      "ConstraintDescription": "must be between 5 and 1024Gb."
+    },
+    "DBInstanceClass": {
+      "Default": "db.m1.small",
+      "Description": "The database instance type",
+      "Type": "String",
+      "AllowedValues": [
+          "db.t1.micro",
+          "db.m1.small",
+          "db.m1.medium",
+          "db.m1.large",
+          "db.m1.xlarge",
+          "db.m2.xlarge",
+          "db.m2.2xlarge",
+          "db.m2.4xlarge",
+          "db.cr1.8xlarge"
+      ],
+      "ConstraintDescription": "must select a valid database instance type."
+    },
+    "DBMultiAZ": {
+      "Description": "Multi-AZ master database",
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+          "true",
+          "false"
+      ],
+      "ConstraintDescription": "must be true or false."
+    },
+    "DBReadReplica": {
+      "Description": "Create a read replica",
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+          "true",
+          "false"
+      ],
+      "ConstraintDescription": "must be true or false."
+    }
+  },
+
+  "Conditions" : {
+    "CreateReadReplica" : { "Fn::Equals" : [ {"Ref" : "DBReadReplica"}, "true"] }
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "t1.micro"    : { "Arch" : "64" },
+      "m1.small"    : { "Arch" : "64" },
+      "m1.large"    : { "Arch" : "64" },
+      "m1.xlarge"   : { "Arch" : "64" },
+      "m2.xlarge"   : { "Arch" : "64" },
+      "m2.2xlarge"  : { "Arch" : "64" },
+      "m2.4xlarge"  : { "Arch" : "64" },
+      "c1.medium"   : { "Arch" : "64" },
+      "c1.xlarge"   : { "Arch" : "64" },
+      "cc1.4xlarge" : { "Arch" : "64" }
+    },
+    "AWSRegionArch2AMI" : {
+      "us-east-1" : { "64" : "ami-018c9568" }
+    }
+  },
+
+  "Resources" : {
+    "MasterDB": {
+        "Type": "AWS::RDS::DBInstance",
+        "Properties": {
+            "DBName": { "Ref": "DBName" },
+            "AllocatedStorage": { "Ref": "DBAllocatedStorage" },
+            "DBInstanceClass": { "Ref": "DBInstanceClass" },
+            "Engine": "MySQL",
+            "EngineVersion": "5.6",
+            "DBSecurityGroups": [ { "Ref": "DBSecurityGroup" } ],
+            "MasterUsername": { "Ref": "DBUser" },
+            "MasterUserPassword": { "Ref": "DBPassword" },
+            "MultiAZ": { "Ref": "DBMultiAZ" },
+            "Tags": [ { "Key": "Name", "Value": "Master Database" } ]
+        },
+        "DeletionPolicy": "Delete"
+    },
+
+    "ReplicaDB": {
+        "Type": "AWS::RDS::DBInstance",
+        "Condition" : "CreateReadReplica",
+        "Properties": {
+            "SourceDBInstanceIdentifier": { "Ref": "MasterDB" },
+            "DBInstanceClass": { "Ref": "DBInstanceClass" },
+            "Tags": [ { "Key": "Name", "Value": "Read Replica Database" } ]
+        }
+    },
+
+    "DBSecurityGroup": {
+      "Type": "AWS::RDS::DBSecurityGroup",
+      "Properties": {
+        "DBSecurityGroupIngress": { "EC2SecurityGroupName": { "Ref": "WebServerSecurityGroup"} },
+        "GroupDescription"      : "Frontend Access"
+      }
+    },
+
+    "WebServerGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "AvailabilityZones" : { "Fn::GetAZs" : ""},
+        "LaunchConfigurationName" : { "Ref" : "LaunchConfig" },
+        "MinSize" : { "Ref": "WebMinInstances" },
+        "MaxSize" : { "Ref": "WebMaxInstances" },
+        "LoadBalancerNames" : [ { "Ref" : "ElasticLoadBalancer" } ]
+      }
+    },
+
+    "LaunchConfig" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Properties" : {
+        "KeyName" : { "Ref" : "KeyName" },
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionArch2AMI", { "Ref" : "AWS::Region" },
+                                          { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "WebInstanceType" },
+                                          "Arch" ] } ] },
+        "UserData" : { "Fn::Base64" : { "Ref" : "WebServerPort" }},
+        "SecurityGroups" : [ { "Ref" : "WebServerSecurityGroup" } ],
+        "InstanceType" : { "Ref" : "WebInstanceType" }
+      }
+    },
+
+    "CPUBasedTrigger" : {
+      "Type" : "AWS::AutoScaling::Trigger",
+      "Properties" : {
+        "MetricName" : "CPUUtilization",
+        "Namespace" : "AWS/EC2",
+        "Statistic" : "Average",
+        "Period" : "300",
+        "UpperBreachScaleIncrement" : "1",
+        "LowerBreachScaleIncrement" : "-1",
+        "AutoScalingGroupName" : { "Ref" : "WebServerGroup" },
+        "BreachDuration" : "600",
+        "UpperThreshold" : "90",
+        "LowerThreshold" : "50",
+        "Dimensions" : [ {
+          "Name" : "AutoScalingGroupName",
+          "Value" : { "Ref" : "WebServerGroup" }
+        } ]
+      }
+    },
+
+    "ElasticLoadBalancer" : {
+      "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties" : {
+        "AvailabilityZones" : { "Fn::GetAZs" : "" },
+        "Listeners" : [ {
+          "LoadBalancerPort" : "80",
+          "InstancePort" : { "Ref" : "WebServerPort" },
+          "Protocol" : "HTTP"
+        } ],
+        "HealthCheck" : {
+          "Target" : { "Fn::Join" : [ "", ["HTTP:", { "Ref" : "WebServerPort" }, "/healthy.html"]]},
+          "HealthyThreshold" : "2",
+          "UnhealthyThreshold" : "3",
+          "Interval" : "10",
+          "Timeout" : "5"
+        }
+      }
+    },
+
+    "WebServerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable SSH access and HTTP access on the inbound port",
+        "SecurityGroupIngress" : [ {
+          "IpProtocol" : "tcp",
+          "FromPort" : "22",
+          "ToPort" : "22",
+          "CidrIp" : "0.0.0.0/0"
+        },
+        {
+          "IpProtocol" : "tcp",
+          "FromPort" : { "Ref" : "WebServerPort" },
+          "ToPort" : { "Ref" : "WebServerPort" },
+          "CidrIp" : "0.0.0.0/0"
+        } ]
+      }
+    }
+  },
+
+  "Outputs" : {
+    "DBEndpoint" : {
+      "Description" : "The DB endpoint for connections",
+      "Value" : { "Fn::GetAtt": [ "MasterDB", "Endpoint.Address" ] }
+    },
+
+    "URL" : {
+      "Description" : "The URL of the website",
+      "Value" :  { "Fn::Join" : [ "", [ "http://", { "Fn::GetAtt" : [ "ElasticLoadBalancer", "DNSName" ]}]]}
+    }
+  }
+}

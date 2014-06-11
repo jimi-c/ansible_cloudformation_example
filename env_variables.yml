@@ -1,0 +1,28 @@
+---
+
+# ----------------------------------------------------------
+# playbook-wide variables
+
+demo_stack_name: "ansible-demo"
+demo_region: "us-east-1"
+
+# ----------------------------------------------------------
+# web front-end variables
+
+web_instance_type: "m1.small"
+web_server_port: "8080"
+web_num_instances: "5"
+
+# ----------------------------------------------------------
+# database variables
+
+db_name: "ansibledemo"
+db_user: "admin"
+db_allocated_storage: "5"
+db_instance_class: "db.m1.small"
+db_multi_az: "false"
+db_read_replica: "false"
+
+# ----------------------------------------------------------
+# drupal specific variables
+
